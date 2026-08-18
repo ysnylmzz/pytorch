@@ -179,12 +179,25 @@ def _foreach_mm_impl_nvmath(
     a_row_major = first_a.stride(-1) == 1
     b_row_major = mat2[0].stride(-1) == 1
     shapes = tuple((a.size(0), b.size(1), a.size(1)) for a, b in zip(self, mat2))
-    key = (shapes, a_row_major, b_row_major, first_a.device)
-    if key not in _nvmath_cache:
-        _nvmath_cache[key] = _get_nvmath_cls()(
-            shapes, G, a_row_major=a_row_major, b_row_major=b_row_major
-        )
-    return _nvmath_cache[key](self, mat2)  # pyrefly: ignore[not-callable]
+    device = first_a.device
+    key = (shapes, a_row_major, b_row_major, device)
+    # The cuBLAS handle, the heuristic query and the stream all resolve against
+    # the current device, and nothing sets it for us: aten::_foreach_mm is
+    # registered only at CompositeExplicitAutograd, for which codegen emits no
+    # device guard (guards are emitted only for CUDA-like backend keys). The
+    # composite kernel does not need one -- it is a loop of at::mm, each guarded
+    # in its own right -- but this single flat call does. Construct and call with
+    # the inputs' device current so cuda:1 inputs don't hit an illegal access.
+    with torch.cuda.device(device):
+        if key not in _nvmath_cache:
+            _nvmath_cache[key] = _get_nvmath_cls()(
+                shapes,
+                G,
+                a_row_major=a_row_major,
+                b_row_major=b_row_major,
+                device=device,
+            )
+        return _nvmath_cache[key](self, mat2)  # pyrefly: ignore[not-callable]
 
 
 # torch._grouped_mm's bf16 kernel requires group_count < 1024; nvmath has no cap.

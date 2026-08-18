@@ -2194,6 +2194,34 @@ class TestForeachMM(TestCase):
             )
         self._check(shapes, torch.bfloat16, "cuda")
 
+    @skipIfNoNvmath
+    @unittest.skipUnless(
+        torch.cuda.is_available() and SM90OrLater, "requires CUDA SM90+"
+    )
+    @unittest.skipIf(not TEST_MULTIACCELERATOR, "multi-GPU not supported")
+    def test_foreach_mm_nvmath_non_default_device(self):
+        from torch._native.ops.foreach_mm.impl import _check_nvmath_cublaslt
+
+        if not _check_nvmath_cublaslt():
+            self.skipTest("cuBLASLt grouped GEMM unavailable")
+        # cuda:0 stays current while the inputs live on cuda:1. The cublasLt
+        # handle, workspace and device-side pointer arrays must follow the
+        # inputs, not the ambient device.
+        shapes = [(256, 128, 64)] * 3
+        with torch.cuda.device(0):
+            A = [
+                torch.randn(M, K, dtype=torch.bfloat16, device="cuda:1")
+                for M, _, K in shapes
+            ]
+            B = [
+                torch.randn(K, N, dtype=torch.bfloat16, device="cuda:1")
+                for _, N, K in shapes
+            ]
+            out = torch._foreach_mm(A, B)
+            for i, (a, b) in enumerate(zip(A, B)):
+                self.assertEqual(out[i].device, a.device)
+                self.assertEqual(out[i], torch.mm(a, b), msg=f"group {i}")
+
 
 instantiate_parametrized_tests(TestForeachMM)
 

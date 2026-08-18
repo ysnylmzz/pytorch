@@ -16,7 +16,10 @@ import torch
 _cublaslt_workspaces: dict[tuple, torch.Tensor] = {}
 
 
-def _get_cublaslt_workspace(device="cuda"):
+def _get_cublaslt_workspace(device):
+    # Key on the indexed device: a workspace is device memory, and an index-less
+    # "cuda" would collapse every device onto one entry and hand cuda:1 a cuda:0
+    # pointer.
     ws_size = torch.backends.cuda.cublaslt_workspace_size()
     key = (torch.device(device), ws_size)
     if key not in _cublaslt_workspaces:
@@ -32,7 +35,12 @@ def _set_attr(setter, handle, attr, val, ctype):
 
 
 class ForeachMMCublasLt:
-    """Cached cublasLt grouped GEMM. Supports uniform or mixed shapes per group."""
+    """Cached cublasLt grouped GEMM. Supports uniform or mixed shapes per group.
+
+    Bound to a single CUDA device: the cuBLAS handle, the workspace and the
+    device-side dim/pointer arrays all belong to ``device``. Construct and call
+    it with ``device`` current (see ``_foreach_mm_impl_nvmath``).
+    """
 
     def __init__(
         self,
@@ -41,17 +49,22 @@ class ForeachMMCublasLt:
         a_row_major=True,
         b_row_major=True,
         dtype=torch.bfloat16,
-        device="cuda",
+        *,
+        device,
     ):
         """
         Args:
             shapes: tuple of (M, N, K) triples, one per group
             G: number of groups (must equal len(shapes))
+            device: CUDA device the inputs live on. Required -- the cuBLAS
+                handle, the workspace and every device-side array below are
+                bound to it.
         """
         if dtype != torch.bfloat16:
             raise ValueError(f"ForeachMMCublasLt only supports bf16, got {dtype}")
 
         self.G = G
+        self._device = torch.device(device)
         self._dtype = dtype
         elem_size = dtype.itemsize
         alignment = 16 // elem_size
@@ -238,7 +251,7 @@ class ForeachMMCublasLt:
             self._algo_ptr,
             self._ws_ptr,
             self._ws_bytes,
-            torch.cuda.current_stream().cuda_stream,
+            torch.cuda.current_stream(self._device).cuda_stream,
         )
 
         # unbind is a single C++ call creating all G views at once.
